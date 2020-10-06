@@ -2,7 +2,7 @@
 Framework for processing work concurrently via Snowflake JS stored proc 
 
 
-[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. The sample code here shows how a single stored procedure can initiate concurrent code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). 
+[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a threading model, i.e. Snowflake stored procedures execute single threaded. How, that doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate concurrent code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). 
 The sample code takes 4 input parameters.
 * method name ('PROCESS_REQUEST') 
 * number of partitions
@@ -19,9 +19,9 @@ To run the sample code in your environment perform the following steps. It is as
     CREATE DATABASE
     EXECUTE TASK
     ```
-1. Clone this repo (use the command below or any other way to clone the repo)
+1. Create a warehouse. The concurrency level is reduced to 4 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger size and or more clusters. Adjust the parameters accordingly. 
     ```
-    create warehouse concurrent_js_test with
+    create warehouse concurrency_test with
        WAREHOUSE_SIZE = XSMALL
        MAX_CLUSTER_COUNT = 10
        SCALING POLICY = STANDARD
@@ -31,36 +31,36 @@ To run the sample code in your environment perform the following steps. It is as
     ```
 1. Clone this repo (use the command below or any other way to clone the repo)
     ```
-    git clone https://github.com/RobertFehrmann/concurrent_js_sample.git
+    git clone https://github.com/RobertFehrmann/concurrency_framework.git
     ```
 1. Create a database and install the stored procedure 
     ```
-    create database concurrent_js_test;
-    create schema concurrent_js_test.meta_schema
+    create database concurrency_test;
+    create schema concurrency_test.meta_schema
     ```
 1. Create procedure sp_concurrent_js from the meta_schema directory inside the cloned repo by loading the file into a new worksheet and then clicking `Run`. Note: If you are getting an error message (SQL compilation error: parse ...), move the cursor to the end of the file, click into the window, and then click `Run` again). Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.
     ```
-    use database concurrent_js_test;
-    use warehouse concurrent_js_test;
+    use database concurrency_test;
+    use warehouse concurrency_test;
     use role <ACCOUNTADMIN/your own custom role>
     ```
 
 ## Testing
 1. Open a new worksheet and set your context. Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.
     ```
-    use database concurrent_js_test;
-    use warehouse concurrent_js_test;
+    use database concurrency_test;
+    use warehouse concurrency_test;
     use role <ACCOUNTADMIN/your own custom role>
     ```
 1. Run test for 1 worker thread, 100 tables, 1 million rows per table. This statement should run for about 7:30 minutes.
     ```
-    call meta_schema.sp_concurrent_js('PROCESS_REQUEST',1,10,1000000);
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',1,100,1000000);
     ```
 1. Check table meta_schema.log for the execution log after the call below completes. 
     ```
     select * from meta_schema.log order by id desc;
     ```
-1. Run test for 10 worker thread, 10 tables, 1 million rows per table. This statement should run for about 2:30 minutes. We are not seeing 
+1. Run test for 10 worker thread, 10 tables, 1 million rows per table. This statement should run for about 2:30 minutes. The number of clusters started by Snowflake is approx. half the number of threads requested. Since the default configuration (see above) is a maximum of 10 clusters, you may not see additional performance improvements above 20 threads. If necessary, increase MAX_CLUSTER_COUNT.
     ```
-    call meta_schema.sp_concurrent_js('PROCESS_REQUEST',1,10,1000000);
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',10,100,1000000);
     ```
