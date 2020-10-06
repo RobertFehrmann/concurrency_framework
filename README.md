@@ -2,7 +2,8 @@
 Framework for processing work concurrently via Snowflake JS stored proc 
 
 
-[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a threading model, i.e. Snowflake stored procedures execute single threaded. How, that doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate concurrent code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). 
+[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a threading model, i.e. Snowflake stored procedures execute single threaded. How, that doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate concurrent code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to partition the total amount of work into N partitions. Each partition of work will be handled by 1 task. Multiple tasks can execute on a single cluster. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is reached. 
+
 The sample code takes 4 input parameters.
 * method name ('PROCESS_REQUEST') 
 * number of partitions
