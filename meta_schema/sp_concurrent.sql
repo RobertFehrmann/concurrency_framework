@@ -167,6 +167,16 @@ function drop_all_workers () {
     }
 }
 
+function set_min_cluster_count(cnt) {
+    var sqlquery="";
+
+    sqlquery=`
+        ALTER WAREHOUSE `+current_warehouse+`
+        SET MIN_CLUSTER_COUNT=`+cnt+` 
+    `;
+    snowflake.execute({sqlText:  sqlquery});
+}
+
 // -----------------------------------------------------------------------------
 //  read environment values
 // -----------------------------------------------------------------------------
@@ -232,6 +242,9 @@ function process_request (partition_count,table_count,table_name,row_count) {
         snowflake.execute({sqlText:  sqlquery});
     }
 
+    // instruct Snowflake to create one cluster per task (partition)
+    set_min_cluster_count(partition_count)
+   
     // when a task starts it puts a record with status BEGIN into the logging table
     // when a task completes it put another record record with status COMPLETE (success) 
     //   or failure into the logging table.
@@ -253,7 +266,7 @@ function process_request (partition_count,table_count,table_name,row_count) {
         WHERE s.scheduler_session_id=current_session()
         ORDER BY s.partition_id
     `;
-    
+
     loop_counter=0
     while (true) {
 
@@ -305,6 +318,8 @@ function process_request (partition_count,table_count,table_name,row_count) {
         }                   
     } 
 
+    set_min_cluster_count(1)
+
     log("procName: " + procName + " " + STATUS_END);
     flush_log(STATUS_END);
 }
@@ -339,12 +354,12 @@ function process_work(partition_id) {
     for (i=min_table_id;i<=max_table_id;i++) {
         log("   CREATE TABLE_"+i);
         sqlquery=`
-            CREATE OR REPLACE TABLE `+current_db+`.`+TABLE_SCHEMA+`.`+table_name+`_`+("0000"+i.toString()).slice(-4)+` AS
+            CREATE OR REPLACE /* `+("0000"+i.toString()).slice(-4)+` */ 
+                TABLE `+current_db+`.`+TABLE_SCHEMA+`.`+table_name+`_`+("0000"+i.toString()).slice(-4)+` AS
                 SELECT 
-                    randstr(128,random(10000))::varchar(128) s1
-                    ,randstr(128,random(10000))::varchar(128) s2
-                    ,randstr(128,random(10000))::varchar(128) s3
-                    ,randstr(128,random(10000))::varchar(128) s4
+                    randstr(16,random(11000)+`+partition_id+`)::varchar(128) s1
+                    ,randstr(16,random(12000)+`+partition_id+`)::varchar(128) s2
+                    ,randstr(16,random(13000)+`+partition_id+`)::varchar(128) s3
                 FROM TABLE(generator(rowcount=>`+row_count+`));
         `; 
         snowflake.execute({sqlText: sqlquery});

@@ -24,11 +24,11 @@ To run the sample code in your environment perform the following steps. It is as
     ```
     create warehouse concurrency_test with
        WAREHOUSE_SIZE = XSMALL
-       MAX_CLUSTER_COUNT = 10
-       SCALING POLICY = STANDARD
+       MAX_CLUSTER_COUNT = 20
+       SCALING_POLICY = STANDARD
        AUTO_SUSPEND = 15
        AUTO_RESUME = TRUE
-       MAX_CONCURRENCY_LEVEL=4;
+       MAX_CONCURRENCY_LEVEL=2;
     ```
 1. Clone this repo (use the command below or any other way to clone the repo)
     ```
@@ -47,21 +47,30 @@ To run the sample code in your environment perform the following steps. It is as
     ```
 
 ## Testing
+
 1. Open a new worksheet and set your context. Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.
     ```
     use database concurrency_test;
     use warehouse concurrency_test;
     use role <ACCOUNTADMIN/your own custom role>
     ```
-1. Run test for 1 worker thread, 100 tables, 1 million rows per table. This statement should run for about 7:30 minutes.
+1. Run test for 1 worker thread, 10 tables, 100 million rows per table. This statement should run for about 10 minutes.
     ```
-    call meta_schema.sp_concurrent('PROCESS_REQUEST',1,100,1000000);
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',1,10,100000000);
     ```
 1. Check table meta_schema.log for the execution log after the call below completes. 
     ```
     select * from meta_schema.log order by id desc;
     ```
-1. Run test for 10 worker thread, 10 tables, 1 million rows per table. This statement should run for about 2:30 minutes. The number of clusters started by Snowflake is approx. half the number of threads requested. Since the default configuration (see above) is a maximum of 10 clusters, you may not see additional performance improvements above 20 threads. If necessary, increase MAX_CLUSTER_COUNT.
+1. Run test for 2 worker threads, 10 tables, 100 million rows per table. This statement should run for about 6 minutes. 
     ```
-    call meta_schema.sp_concurrent('PROCESS_REQUEST',10,100,1000000);
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',2,10,100000000);
+    ```
+1. Run test for 10 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 10 minutes. This test creates about 1/2 a TB of data and consumes about 1.5 credits.
+    ```
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',10,100,100000000);
+    ```
+1. Run test for 20 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 6 minutes. This test creates about 1/2 a TB of data and consumes about 2 credits.
+    ```
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',20,100,100000000);
     ```
