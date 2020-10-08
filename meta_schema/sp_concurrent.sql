@@ -7,7 +7,7 @@ $$
 // -----------------------------------------------------------------------------
 // Author      Robert Fehrmann
 // Created     2020-09-30
-// Purpose     SP_PARALLEL is a "library" of functions to perform the work for a delightfully parallel 
+// Purpose     SP_CONCURRENT is a "library" of functions to perform the work for a embarrassingly parallel
 //             problem. 
 //             The stored procedure accepts the following methods:
 //                PROCESS_REQUEST: 
@@ -143,13 +143,13 @@ function init () {
 }
 
 // -----------------------------------------------------------------------------
-//  cleanup; drop all tasks after successful or failure completion
+//  cleanup; suspend all tasks after failure 
 // -----------------------------------------------------------------------------
-function drop_all_workers () {
+function suspend_all_workers () {
 
     var worker_id=0;
 
-    log("DROP ALL WORKERS");
+    log("   SUSPEND ALL WORKERS");
     var sqlquery=`
         SELECT partition_id
         FROM   "` + current_db + `".` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
@@ -159,16 +159,80 @@ function drop_all_workers () {
     var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
 
     while (ResultSet.next()) {
-        var worker_id=ResultSet.getColumnValue(1); 
+        worker_id=ResultSet.getColumnValue(1); 
+
+        log("      SUSPEND WORKER "+TASK_NAME_WORKER+"_"+worker_id);
+
         sqlquery=`
-            DROP TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + `
-        `;
-        snowflake.execute({sqlText:  sqlquery});
+            ALTER TASK `+current_db+`.`+TMP_SCHEMA+`.`+TASK_NAME_WORKER+`_`+worker_id+` suspend`;
+        snowflake.execute({sqlText: sqlquery});
     }
 }
 
+// -----------------------------------------------------------------------------
+//  cleanup; kill all running queries after failure 
+// -----------------------------------------------------------------------------
+function kill_all_running_worker_queries() {
+    var sqlquery="";
+    var sqlquery2="";
+    var sqlquery3="";
+    var worker_id=0;
+    var worker_session_id=0;
+    var query_id="";
+
+    log("   CANCEL RUNNING QUERIES")
+
+    sqlquery=`
+        WITH worker_log AS (
+            SELECT partition_id, status, scheduler_session_id, session_id, create_ts
+            FROM ` + current_db + `.` + META_SCHEMA + `.` + LOG_TABLE + `
+            WHERE status = '`+STATUS_BEGIN+`'
+                AND method = '`+METHOD_WORKER+`'
+            QUALIFY 1=(row_number() OVER (PARTITION BY scheduler_session_id,partition_id ORDER BY create_ts desc))
+        )
+        SELECT s.partition_id,l.session_id worker_session_id
+        FROM  ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `  s
+            INNER JOIN worker_log l
+            ON l.scheduler_session_id = s.scheduler_session_id 
+               AND l.partition_id=s.partition_id
+               AND l.create_ts > s.create_ts
+        WHERE s.scheduler_session_id=current_session()
+        ORDER BY s.partition_id
+    `;
+    var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
+    while (ResultSet.next()) {
+        worker_id        = ResultSet.getColumnValue(1);
+        worker_session_id= ResultSet.getColumnValue(2);
+
+        log("      FIND RUNNING QUERIES FOR WORKER ID: "+worker_id+" SESSION_ID: "+worker_session_id);
+
+        sqlquery2=`
+            SELECT query_id 
+            FROM table(information_schema.query_history_by_session(SESSION_ID=>`+worker_session_id+`,RESULT_LIMIT=>1000))
+            WHERE execution_status='RUNNING'
+            ORDER BY start_time DESC;
+        `;
+        var ResultSet2 = (snowflake.createStatement({sqlText:sqlquery2})).execute();
+        while (ResultSet2.next()) {
+            query_id = ResultSet2.getColumnValue(1);
+
+            log("         CANCEL QUERY: "+query_id);
+
+            sqlquery3=`
+                SELECT SYSTEM$CANCEL_QUERY('`+query_id+`')
+            `;
+            snowflake.execute({sqlText:  sqlquery3});
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+//  pre-allocate compute tier
+// -----------------------------------------------------------------------------
 function set_min_cluster_count(cnt) {
     var sqlquery="";
+
+    log("   SET MIN_CLUSTER_COUNT: "+cnt);
 
     sqlquery=`
         ALTER WAREHOUSE `+current_warehouse+`
@@ -182,6 +246,8 @@ function set_min_cluster_count(cnt) {
 // -----------------------------------------------------------------------------
 function process_request (partition_count,table_count,table_name,row_count) {
     var sqlquery="";
+    var worker_status="";
+    var worker_session_id=0;
     var worker_id=0;
     var loop_counter=0;
     var counter=0;
@@ -215,7 +281,6 @@ function process_request (partition_count,table_count,table_name,row_count) {
             ORDER BY partition_id
     `;
     snowflake.execute({sqlText:  sqlquery});
-
 
     // create a task for each partition (partition ids are assumed to be unique)
     sqlquery=`
@@ -281,7 +346,6 @@ function process_request (partition_count,table_count,table_name,row_count) {
             worker_status    = ResultSet.getColumnValue(3);
             if (worker_status==STATUS_FAILURE) {
                 log("   WORKER "+worker_id+" FAILED" );
-                drop_all_workers();
                 throw new Error("WORKER ID " +worker_id+ " FAILED") 
             } else if (worker_status == STATUS_WAIT) {            
                 counter+=1;
@@ -293,7 +357,6 @@ function process_request (partition_count,table_count,table_name,row_count) {
                 log("   WORKER ID "+worker_id+" COMPLETED");
             } else {
                 log("UNKNOWN WORKER STATUS "+worker_status)
-                drop_all_workers();
                 throw new Error("UNKNOWN WORKER STATUS "+worker_status+"; ABORT")
             }
         }
@@ -304,7 +367,6 @@ function process_request (partition_count,table_count,table_name,row_count) {
 
         if (counter<=0)  {
             log("ALL WORKERS COMPLETED SUCCESSFULLY");
-            drop_all_workers();
             break;
         } else {
             if (loop_counter<WORKER_TIMEOUT_COUNT) {
@@ -312,13 +374,17 @@ function process_request (partition_count,table_count,table_name,row_count) {
                 log("   WAITING FOR "+counter+" WORKERS TO COMPLETE; LOOP CNT "+loop_counter);
                 snowflake.execute({sqlText: "call /* "+loop_counter+" */ system$wait("+WAIT_TO_POLL+")"});
             } else {
-                drop_all_workers();
                 throw new Error("MAX WAIT REACHED; ABORT");
             }
         }                   
     } 
 
-    set_min_cluster_count(1)
+    set_min_cluster_count(1);
+
+    sqlquery=`
+        DROP SCHEMA `+current_db+`.`+TMP_SCHEMA+`
+    `;
+    snowflake.execute({sqlText: sqlquery});
 
     log("procName: " + procName + " " + STATUS_END);
     flush_log(STATUS_END);
@@ -436,13 +502,23 @@ try {
     return return_array;
 }
 catch (err) {
-   log("ERROR found - MAIN try command");
-   log("err.code: " + err.code);
-   log("err.state: " + err.state);
-   log("err.message: " + err.message);
-   log("err.stacktracetxt: " + err.stacktracetxt);
-   log("procName: " + procName );
-   flush_log(STATUS_FAILURE);
-   return return_array;
+    log("ERROR found - MAIN try command");
+    log("err.code: " + err.code);
+    log("err.state: " + err.state);
+    log("err.message: " + err.message);
+
+    try {
+        suspend_all_workers();
+        set_min_cluster_count(1);
+        kill_all_running_worker_queries();
+    }
+    catch(err) {
+        log("err.code: " + err.code);
+        log("err.state: " + err.state);
+        log("err.message: " + err.message);
+    }
+
+    flush_log(STATUS_FAILURE);
+    return return_array;
 }
 $$;
