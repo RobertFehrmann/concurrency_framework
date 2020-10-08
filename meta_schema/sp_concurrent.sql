@@ -307,9 +307,9 @@ function process_request (partition_count,table_count,table_name,row_count) {
         snowflake.execute({sqlText:  sqlquery});
     }
 
-    // instruct Snowflake to create one cluster per task (partition)
-    set_min_cluster_count(partition_count)
-   
+    // per-allocate one cluster per task (partition)
+    set_min_cluster_count(partition_count);
+    set_min_cluster_count(1);   
     // when a task starts it puts a record with status BEGIN into the logging table
     // when a task completes it put another record record with status COMPLETE (success) 
     //   or failure into the logging table.
@@ -378,8 +378,6 @@ function process_request (partition_count,table_count,table_name,row_count) {
             }
         }                   
     } 
-
-    set_min_cluster_count(1);
 
     sqlquery=`
         DROP SCHEMA `+current_db+`.`+TMP_SCHEMA+`
@@ -509,7 +507,6 @@ catch (err) {
 
     try {
         suspend_all_workers();
-        set_min_cluster_count(1);
         kill_all_running_worker_queries();
     }
     catch(err) {
