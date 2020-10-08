@@ -21,7 +21,8 @@ To run the sample code in your environment perform the following steps. It is as
     CREATE DATABASE
     EXECUTE TASK
     ```
-1. Create a warehouse. The concurrency level is reduced to 4 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger size and or more clusters. Adjust the parameters accordingly. 
+1. Create a warehouse. The concurrency level is reduced to 2 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger size and or more clusters. Adjust the parameters accordingly. 
+Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the number of requested partitions. Doing so ensures that there is one cluster available for each partition.   
     ```
     create warehouse concurrency_test with
        WAREHOUSE_SIZE = XSMALL
