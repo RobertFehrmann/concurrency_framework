@@ -9,6 +9,7 @@ The sample code takes 4 input parameters.
 * number of partitions
 * number of tables to be created
 * number of rows to be created per table
+
 It implements a simple model for an [Embarrassingly parallel](https://en.wikipedia.org/wiki/Embarrassingly_parallel) problem. To adapt the sample code for you own processing, you have to 
 * define how to partition the total amount of work into N partitions of approx the same amount of work (measured in execution time)
 * define how to execute the work for each partition
