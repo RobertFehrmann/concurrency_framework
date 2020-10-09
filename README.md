@@ -50,7 +50,7 @@ Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the 
 
 ## Testing
 
-1. Open a new worksheet and set your context. Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.  
+1. Open a new worksheet and set your context, either from the drop downs in your worksheet or by running the commands below.  
     ```
     use database concurrency_test;
     use warehouse concurrency_test;
@@ -64,15 +64,15 @@ Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the 
     ```
     select * from meta_schema.log order by id desc;
     ```
-1. Run test for 2 worker threads, 10 tables, 100 million rows per table. This statement should run for about 6 minutes. 
+1. Run test for 2 worker threads, 10 tables, 100 million rows per table. This statement should run for about 6 minutes, i.e. double the resources for the same amount of work should yield half the run time. 
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',2,10,100000000);
     ```
-1. Run test for 5 worker thread, 50 tables (!), 100 million rows per table. This statement should run for about 12 minutes. This test creates about 1/4 a TB of data and consumes about 1 credit.
+1. Run test for 5 worker thread, 50 tables (!), 100 million rows per table. This statement should run for about 12 minutes, i.e. 5 times the resouces for 5 times the work should yield about the same run time as the first test. This test creates about 1/4 a TB of data and consumes about 1 credit.
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',5,50,100000000);
     ```
-1. Run test for 10 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 12 minutes. This test creates about 1/2 a TB of data and consumes about 2 credits.
+1. Run test for 10 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 12 minutes, i.e. 10 times the resources for 10 times the work should yield about the same run time as the first test. This test creates about 1/2 a TB of data and consumes about 2 credits.
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',10,100,100000000);
     ```
