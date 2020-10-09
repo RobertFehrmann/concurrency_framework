@@ -26,7 +26,7 @@ Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the 
     ```
     create warehouse concurrency_test with
        WAREHOUSE_SIZE = XSMALL
-       MAX_CLUSTER_COUNT = 20
+       MAX_CLUSTER_COUNT = 10
        SCALING_POLICY = STANDARD
        AUTO_SUSPEND = 15
        AUTO_RESUME = TRUE
@@ -50,13 +50,13 @@ Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the 
 
 ## Testing
 
-1. Open a new worksheet and set your context. Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.
+1. Open a new worksheet and set your context. Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.  
     ```
     use database concurrency_test;
     use warehouse concurrency_test;
     use role <ACCOUNTADMIN/your own custom role>
     ```
-1. Run test for 1 worker thread, 10 tables, 100 million rows per table. This statement should run for about 10 minutes.
+1. Run test for 1 worker thread, 10 tables, 100 million rows per table. This statement should run for about 12 minutes.
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',1,10,100000000);
     ```
@@ -68,11 +68,12 @@ Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the 
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',2,10,100000000);
     ```
-1. Run test for 10 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 10 minutes. This test creates about 1/2 a TB of data and consumes about 1.5 credits.
+1. Run test for 5 worker thread, 50 tables (!), 100 million rows per table. This statement should run for about 12 minutes. This test creates about 1/4 a TB of data and consumes about 1 credit.
+    ```
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',5,50,100000000);
+    ```
+1. Run test for 10 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 12 minutes. This test creates about 1/2 a TB of data and consumes about 2 credits.
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',10,100,100000000);
     ```
-1. Run test for 20 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 6 minutes. This test creates about 1/2 a TB of data and consumes about 2 credits.
-    ```
-    call meta_schema.sp_concurrent('PROCESS_REQUEST',20,100,100000000);
-    ```
+
