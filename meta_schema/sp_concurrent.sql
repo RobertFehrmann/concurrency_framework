@@ -63,6 +63,9 @@ const SCHEDULER_TABLE="SCHEDULER";
 // Worker timeout and polling interval
 WORKER_TIMEOUT_COUNT=360;
 WAIT_TO_POLL=30;
+TASK_TIMEOUT=10800000;
+
+
 
 // Global Variables
 var current_db="";
@@ -296,6 +299,7 @@ function process_request (partition_count,table_count,table_name,row_count) {
         sqlquery=`
             CREATE OR REPLACE TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id +`
                 WAREHOUSE =  `+current_warehouse+`
+                USER_TASK_TIMEOUT_MS = `+TASK_TIMEOUT+`
                 SCHEDULE= '1 MINUTE' 
             AS call `+current_db+`.`+META_SCHEMA+`.`+this_name+`('`+METHOD_WORKER+`',`+worker_id+`,null,null)
         `;
