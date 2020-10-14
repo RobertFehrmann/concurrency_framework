@@ -16,14 +16,14 @@ $$
 //                       METHOD_PARAM_2: #of tables to create 
 //                       METHOD_PARAM_3: #of rows per table
 //                   This method is the scheduler (coordinator) method. It divides the total number of tables into 
-//                   equal partitions (number of tables) per worker and stores in instructions in the SCHEDULER table.
+//                   equal partitions (number of tables) per worker and stores instructions in the SCHEDULER table.
 //                   Then it creates one task(worker) per partition 
 //                   and waits until all workers complete or a maximum wait time has passed.
 //                WORKER: The worker method performs the actual work. It creates the tables based on the configuration
 //                   in the SCHEDULER table.
 //             Process coordination is accomplished via the SCHEDULER and the LOG tables.
 //
-//             To show the framework in action the sample code here shows how to create a generate data for a set of
+//             To show the framework in action the sample code here shows how to create and generate data for a set
 //             of tables by creating a configurable number of parallel tasks
 // -----------------------------------------------------------------------------
 // Modification History
@@ -311,9 +311,11 @@ function process_request (partition_count,table_count,table_name,row_count) {
         snowflake.execute({sqlText:  sqlquery});
     }
 
-    // per-allocate one cluster per task (partition)
+    // pre-allocate one cluster per task (partition) and reset it to 1; This is just to jump-start
+    // the creation of all clusters needed.
     set_min_cluster_count(partition_count);
     set_min_cluster_count(1);   
+           
     // when a task starts it puts a record with status BEGIN into the logging table
     // when a task completes it put another record record with status COMPLETE (success) 
     //   or failure into the logging table.
