@@ -2,7 +2,7 @@
 Framework for processing work concurrently via Snowflake JS stored proc 
 
 
-[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a threading model, i.e. Snowflake stored procedures execute single threaded. How, that doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate concurrent code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to partition the total amount of work into N partitions. Each partition of work will be handled by 1 task. Multiple tasks can execute on a single cluster. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is reached. 
+[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a multithreading for parallel or concurrent execution, i.e. a snowflake stored procedures can not start additional processes. At least not directly. Luckily this doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate parallel code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to partition the total amount of work into N partitions. Each partition of work will be handled by 1 task. Multiple tasks can execute on a single cluster. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is reached. Cross process communiction can be accomplished by messages in a logging table.
 
 The sample code takes 4 input parameters.
 * method name ('PROCESS_REQUEST') 
@@ -10,7 +10,7 @@ The sample code takes 4 input parameters.
 * number of tables to be created
 * number of rows to be created per table
 
-It implements a simple model for an [Embarrassingly parallel](https://en.wikipedia.org/wiki/Embarrassingly_parallel) problem. To adapt the sample code for you own processing, you have to 
+It implements a simple model for an [Embarrassingly parallel](https://en.wikipedia.org/wiki/Embarrassingly_parallel) problem. To adapt the sample code for your own processing, you have to 
 * define how to partition the total amount of work into N partitions of approx the same amount of work (measured in execution time)
 * define how to execute the work for each partition
 
@@ -21,8 +21,8 @@ To run the sample code in your environment perform the following steps. It is as
     CREATE DATABASE
     EXECUTE TASK
     ```
-1. Create a warehouse. The concurrency level is reduced to 2 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger size and or more clusters. Adjust the parameters accordingly. 
-Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the number of requested partitions. Doing so ensures that there is one cluster available for each partition.   
+1. Create a warehouse. The concurrency level is reduced to 2 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger size and or more clusters, and or a different MAX_CONCURRENCY_LEVEL. Adjust the parameters accordingly. 
+Note: While the framework processes one(1) request, it sets MIN_CLUSTER_COUNT to the number of requested partitions. Doing so ensures that there is one cluster available for each partition.   
     ```
     create warehouse concurrency_test with
        WAREHOUSE_SIZE = XSMALL
@@ -41,7 +41,7 @@ Note: While the framework processes a request, it sets MIN_CLUSTER_COUNT to the 
     create database concurrency_test;
     create schema concurrency_test.meta_schema
     ```
-1. Create procedure sp_concurrent_js from the meta_schema directory inside the cloned repo by loading the file into a new worksheet and then clicking `Run`. Note: If you are getting an error message (SQL compilation error: parse ...), move the cursor to the end of the file, click into the window, and then click `Run` again). Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.
+1. Create procedure sp_concurrent from the meta_schema directory inside the cloned repo by loading the file into a new worksheet and then clicking `Run`. Note: If you are getting an error message (SQL compilation error: parse ...), move the cursor to the end of the file, click into the window, and then click `Run` again). Be sure to set your context correctly, either from the drop downs in your worksheet or by running the the commands below.
     ```
     use database concurrency_test;
     use warehouse concurrency_test;
