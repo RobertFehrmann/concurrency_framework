@@ -1,4 +1,4 @@
-create or replace procedure META_SCHEMA.SP_CONCURRENT(I_METHOD VARCHAR,I_METHOD_PARAM_1 float, I_METHOD_PARAM_2 float, I_METHOD_PARAM_3 float)
+create or replace procedure META_SCHEMA.SP_CONCURRENT(I_METHOD VARCHAR,I_METHOD_PARAM_1 float, I_METHOD_PARAM_2 float, I_METHOD_PARAM_3 VARCHAR)
     returns ARRAY
     language JAVASCRIPT
     execute as caller
@@ -37,35 +37,40 @@ $$
 
 // copy parameters into local constant; none of the input values can be modified
 const METHOD= I_METHOD;
-const PARTITION_COUNT=I_METHOD_PARAM_1;
-const TABLE_COUNT=I_METHOD_PARAM_2;
-const ROW_COUNT=I_METHOD_PARAM_3;
+const CLUSTER_COUNT=I_METHOD_PARAM_1;
+const STEPS_PER_BATCH=I_METHOD_PARAM_2;
+const INPUT_TABLE=I_METHOD_PARAM_3;
 const WORKER_ID=I_METHOD_PARAM_1;
+
 
 // keep all constants in a common place
 const METHOD_PROCESS_REQUEST='PROCESS_REQUEST';
 const METHOD_WORKER='WORKER';
 
+const STATUS_SCHEDULED="SCHEDULED";
+const STATUS_ASSIGNED="ASSIGNED";
 const STATUS_BEGIN= "BEGIN";
 const STATUS_END = "END";
 const STATUS_WAIT = "WAIT TO COMPLETE";
 const STATUS_WARNING = "WARNING";
 const STATUS_FAILURE = "FAILURE";
+const STATUS_IDLE = "IDLE";
 const TASK_NAME_WORKER="WORKER"
 
 const META_SCHEMA="META_SCHEMA";
 const TMP_SCHEMA="TMP_SCHEMA";
-const TABLE_SCHEMA="TABLE_SCHEMA";
 const TABLE_NAME="TABLE";
 const LOG_TABLE="LOG";
-const SCHEDULER_TABLE="SCHEDULER";
+const SCHEDULER_TABLE="SCHEDULER"
+const WORK_TABLE="WORK";
+const WORKER_TABLE="WORKER";
+const TASK_TABLE="TASK";
+const TASK_STREAM="STREAM_TASK";
 
 // Worker timeout and polling interval
-WORKER_TIMEOUT_COUNT=360;
-WAIT_TO_POLL=30;
+WORKER_TIMEOUT_COUNT=720;
+WAIT_TO_POLL=15;
 TASK_TIMEOUT=10800000;
-
-
 
 // Global Variables
 var current_db="";
@@ -73,7 +78,6 @@ var current_warehouse="";
 var return_array = [];
 var scheduler_session_id=0;
 var session_id=0;
-var partition_id=0;
 
 var this_name = Object.keys(this)[0];
 var procName = this_name + "-" + METHOD;
@@ -102,8 +106,8 @@ function flush_log (status){
 
     for (i=0; i<2; i++) {
         try {
-            var sqlquery = "INSERT INTO " + current_db + "." + META_SCHEMA + "." + LOG_TABLE + " ( scheduler_session_id, partition_id, method, status,message) values ";
-            sqlquery = sqlquery + "("+scheduler_session_id +","+partition_id+ ",'" + METHOD + "','" + status + "','" + message + "');";
+            var sqlquery = "INSERT INTO " + current_db + "." + META_SCHEMA + "." + LOG_TABLE + " ( method, status,message) values ";
+            sqlquery = sqlquery + "('" + METHOD + "','" + status + "','" + message + "');";
             snowflake.execute({sqlText: sqlquery});
             break;
         }
@@ -112,9 +116,7 @@ function flush_log (status){
                 CREATE TABLE IF NOT EXISTS `+ current_db + `.` + META_SCHEMA + `.` + LOG_TABLE + ` (
                     id integer AUTOINCREMENT (0,1)
                     ,create_ts timestamp_tz(9) default current_timestamp
-                    ,scheduler_session_id number default 0
                     ,session_id number default to_number(current_session())
-                    ,partition_id integer
                     ,method varchar
                     ,status varchar
                     ,message varchar)`;
@@ -154,8 +156,10 @@ function suspend_all_workers () {
 
     log("   SUSPEND ALL WORKERS");
     var sqlquery=`
-        SELECT partition_id
+        SELECT worker_id
         FROM   "` + current_db + `".` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
+        WHERE worker_session_id IS NOT NULL
+        QUALIFY 1=(row_number() OVER (PARTITION BY worker_id ORDER BY create_ts desc))
         ORDER BY 1
     `;
 
@@ -186,21 +190,10 @@ function kill_all_running_worker_queries() {
     log("   CANCEL RUNNING QUERIES")
 
     sqlquery=`
-        WITH worker_log AS (
-            SELECT partition_id, status, scheduler_session_id, session_id, create_ts
-            FROM ` + current_db + `.` + META_SCHEMA + `.` + LOG_TABLE + `
-            WHERE status = '`+STATUS_BEGIN+`'
-                AND method = '`+METHOD_WORKER+`'
-            QUALIFY 1=(row_number() OVER (PARTITION BY scheduler_session_id,partition_id ORDER BY create_ts desc))
-        )
-        SELECT s.partition_id,l.session_id worker_session_id
-        FROM  ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `  s
-            INNER JOIN worker_log l
-            ON l.scheduler_session_id = s.scheduler_session_id 
-               AND l.partition_id=s.partition_id
-               AND l.create_ts > s.create_ts
-        WHERE s.scheduler_session_id=current_session()
-        ORDER BY s.partition_id
+        SELECT worker_id, worker_session_id,status
+        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +` s
+        WHERE worker_id is not null
+        QUALIFY 1=(row_number() OVER (PARTITION BY worker_id ORDER BY create_ts desc))
     `;
     var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
     while (ResultSet.next()) {
@@ -234,8 +227,9 @@ function kill_all_running_worker_queries() {
 // -----------------------------------------------------------------------------
 function set_min_cluster_count(cnt) {
     var sqlquery="";
+    var batch_id=0;
 
-    log("   SET MIN_CLUSTER_COUNT: "+cnt);
+    log("SET MIN_CLUSTER_COUNT: "+cnt);
 
     sqlquery=`
         ALTER WAREHOUSE `+current_warehouse+`
@@ -244,19 +238,115 @@ function set_min_cluster_count(cnt) {
     snowflake.execute({sqlText:  sqlquery});
 }
 
+function assign_next_batch(worker_id) {
+    var sqlquery="";
+    var batch_id=0;
+
+    log("ASSIGN WORK FOR WORKER: "+worker_id)
+    sqlquery=`
+        SELECT batch_id
+        FROM (  (   SELECT batch_id
+                    FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +`
+                    WHERE status = '`+STATUS_SCHEDULED+`'
+                    GROUP BY batch_id  
+                ) MINUS (
+                    SELECT batch_id
+                    FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +`
+                    WHERE status in ( '`+STATUS_ASSIGNED+`','`+STATUS_BEGIN+`','`+STATUS_END+`','`+STATUS_FAILURE+`')
+                    GROUP BY batch_id
+                ))
+        ORDER BY batch_id
+        LIMIT 1
+    `;
+    var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
+
+    if (ResultSet.next()) {
+        batch_id=ResultSet.getColumnValue(1);
+        log("   BATCH_ID: "+batch_id) 
+
+        for (var i=0;i<2;i++) {
+            try {
+                sqlquery=`
+                    INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_TABLE+ `_` + worker_id +`
+                        VALUES (current_session(),`+batch_id+`,`+worker_id+`)         
+                    `;
+                snowflake.execute({sqlText:  sqlquery});
+
+                sqlquery=`
+                    INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
+                            (scheduler_session_id, batch_id, worker_id, status)
+                        VALUES (current_session(), `+batch_id+`,`+worker_id+`,'`+STATUS_ASSIGNED+`')
+                `;
+                snowflake.execute({sqlText:  sqlquery});
+                break;
+            }
+            catch (err) {
+                log("   CREATE TABLE/STREAM/TASK FOR WORKER: "+worker_id)
+                sqlquery=`
+                    CREATE OR REPLACE TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_TABLE+ `_` + worker_id +` (
+                        scheduler_session_id integer
+                        ,batch_id integer
+                        ,worker_id integer) 
+                `;
+                snowflake.execute({sqlText:  sqlquery});
+                
+                sqlquery=`
+                    CREATE OR REPLACE STREAM ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_STREAM + `_` + worker_id +` 
+                        ON TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_TABLE+ `_` + worker_id +` 
+                `;
+                snowflake.execute({sqlText:  sqlquery});
+
+                sqlquery=`
+                    CREATE OR REPLACE TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id +`
+                        WAREHOUSE =  `+current_warehouse+`
+                        USER_TASK_TIMEOUT_MS = `+TASK_TIMEOUT+`
+                        SCHEDULE= '1 MINUTE' 
+                        WHEN SYSTEM$STREAM_HAS_DATA('` + current_db + `.` + TMP_SCHEMA + `.` + TASK_STREAM + `_` + worker_id +`')
+                    AS call `+current_db+`.`+META_SCHEMA+`.`+this_name+`('`+METHOD_WORKER+`',`+worker_id+`,null,null)
+                `;
+                snowflake.execute({sqlText:  sqlquery});
+                
+                sqlquery=`
+                    ALTER TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + ` resume
+                `;
+                snowflake.execute({sqlText:  sqlquery});
+            }
+            assigned=1;
+        }   
+    } else {
+        log("   ALL BATCHES PROCESSED; WORKER IDLE")
+        sqlquery=`
+            INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
+                    (scheduler_session_id, batch_id, worker_id, status)
+                VALUES (current_session(), null,`+worker_id+`,'`+STATUS_IDLE+`')
+        `;
+        snowflake.execute({sqlText:  sqlquery});
+
+        sqlquery=`
+            ALTER TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + ` suspend
+        `;
+        snowflake.execute({sqlText:  sqlquery});
+
+        assigned=0;
+    }
+
+    return assigned;
+}
+
 // -----------------------------------------------------------------------------
 //  read environment values
 // -----------------------------------------------------------------------------
-function process_request (partition_count,table_count,table_name,row_count) {
+function process_request (cluster_count,steps_per_batch) {
     var sqlquery="";
     var worker_status="";
     var worker_session_id=0;
     var worker_id=0;
     var loop_counter=0;
-    var counter=0;
-
-    log("procName: " + procName + " " + STATUS_BEGIN);
-    flush_log(STATUS_BEGIN);
+    var running=0;
+    var assigned=0;
+    var worker_count=0;
+    var batch_count=0;
+    var worker_count=0;
 
     sqlquery=`
         CREATE OR REPLACE SCHEMA `+current_db+`.`+TMP_SCHEMA+`
@@ -264,120 +354,139 @@ function process_request (partition_count,table_count,table_name,row_count) {
     snowflake.execute({sqlText: sqlquery});
 
     sqlquery=`
-        CREATE OR REPLACE SCHEMA `+current_db+`.`+TABLE_SCHEMA+`
+        CREATE OR REPLACE TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` (
+            id integer identity (1,1)
+            ,scheduler_session_id integer
+            ,worker_session_id integer
+            ,worker_id integer
+            ,batch_id integer
+            ,status varchar
+            ,create_ts timestamp_tz(9) default current_timestamp() )
+        `;
+    snowflake.execute({sqlText: sqlquery});                  
+
+    sqlquery=`
+        SELECT 1
+        FROM `+current_db+`.information_schema.tables
+        WHERE table_schema = '`+META_SCHEMA+`'
+          AND table_name = '`+INPUT_TABLE+`'
+    `;
+    var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
+
+    if (ResultSet.next()) {
+        log("USING INPUT TABLE: "+INPUT_TABLE)
+    } else {
+        throw new Error("INPUT_TABLE "+ INPUT_TABLE +" IN SCHEMA "+meta_schema+" NOT FOUND")
+    }
+
+    //partition work
+    sqlquery=`
+        CREATE OR REPLACE TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE +` AS
+            SELECT trunc(seq4()/`+steps_per_batch+`)+1 batch_id, statement_id, task
+            FROM ` + current_db + `.` + META_SCHEMA + `.` + INPUT_TABLE +`
+        `;
+    snowflake.execute({sqlText: sqlquery});
+    
+    sqlquery=`
+        INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
+                (scheduler_session_id,batch_id,status)
+            SELECT current_session(), batch_id, '`+STATUS_SCHEDULED+`' 
+            FROM ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE +`
+            GROUP BY batch_id
     `;
     snowflake.execute({sqlText: sqlquery});
 
-    // generate one row per table to be created and assign each to a partition
-    //   store the min and max values for each partition along with the 
-    //   partition id, table_name, and row_count per table in the SCHEDULER_TABLE
+ 
     sqlquery=`
-        CREATE OR REPLACE TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` AS
-            SELECT current_session() scheduler_session_id,partition_id, '`+table_name+`' table_name
-                   , min(id)+1 min_table_id, max(id)+1 max_table_id,`+ROW_COUNT+` row_count
-                   , current_timestamp()::timestamp_tz(9) create_ts
-            FROM (
-                SELECT seq4() id, trunc(id*(`+partition_count+`/`+table_count+`)+1) partition_id
-                FROM   table(generator(rowcount=>`+table_count+`))
-                ) 
-            GROUP BY partition_id
-            ORDER BY partition_id
+        SELECT count(distinct batch_id)
+        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ `
     `;
-    snowflake.execute({sqlText:  sqlquery});
-
-    // create a task for each partition (partition ids are assumed to be unique)
-    sqlquery=`
-        SELECT partition_id
-        FROM   "` + current_db + `"."` + TMP_SCHEMA + `"."` + SCHEDULER_TABLE+ `" 
-        ORDER BY 1
-    `;
-
     var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
 
-    while (ResultSet.next()) {
-        worker_id=ResultSet.getColumnValue(1); 
-        sqlquery=`
-            CREATE OR REPLACE TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id +`
-                WAREHOUSE =  `+current_warehouse+`
-                USER_TASK_TIMEOUT_MS = `+TASK_TIMEOUT+`
-                SCHEDULE= '1 MINUTE' 
-            AS call `+current_db+`.`+META_SCHEMA+`.`+this_name+`('`+METHOD_WORKER+`',`+worker_id+`,null,null)
-        `;
-        snowflake.execute({sqlText:  sqlquery});
-      
-        sqlquery=`
-            ALTER TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + ` resume
-        `;
-        snowflake.execute({sqlText:  sqlquery});
+    if (ResultSet.next()) {
+        batch_count = ResultSet.getColumnValue(1);
+        if ( batch_count > CLUSTER_COUNT) {
+            worker_count=CLUSTER_COUNT;
+        } else {
+            worker_count=batch_count;
+        }
+    } else {
+        throw new Error ("NO WORKER FOUND")
     }
 
     // pre-allocate one cluster per task (partition) and reset it to 1; This is just to jump-start
     // the creation of all clusters needed.
-    set_min_cluster_count(partition_count);
-    set_min_cluster_count(1);   
-           
+    if (worker_count>0) {
+        set_min_cluster_count(worker_count);
+        set_min_cluster_count(1); 
+    } 
+
+    //initialize worker array of open worker slots
+    worker_queue=[];
+
+    assigned=0;
+    for (var i=1; i<=worker_count;i++) {
+        assigned+=assign_next_batch(i);
+    }
+    log("ASSIGNED "+assigned+" BATCHES; CLUSTER COUNT: "+worker_count);
+
     // when a task starts it puts a record with status BEGIN into the logging table
     // when a task completes it put another record record with status COMPLETE (success) 
     //   or failure into the logging table.
 
     sqlquery=`
-        WITH worker_log AS (
-            SELECT partition_id, status, scheduler_session_id, session_id, create_ts
-            FROM ` + current_db + `.` + META_SCHEMA + `.` + LOG_TABLE + `
-            WHERE status in ('`+STATUS_BEGIN+`','`+STATUS_END+`','`+STATUS_FAILURE+`')
-                AND method = '`+METHOD_WORKER+`'
-            QUALIFY 1=(row_number() OVER (PARTITION BY scheduler_session_id,partition_id ORDER BY create_ts desc))
-        )
-        SELECT s.partition_id, nvl(l.session_id,0) worker_session_id, nvl(l.status,'`+STATUS_WAIT+`')
-        FROM  ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `  s
-            LEFT OUTER JOIN worker_log l
-            ON l.scheduler_session_id = s.scheduler_session_id 
-               AND l.partition_id=s.partition_id
-               AND l.create_ts > s.create_ts
-        WHERE s.scheduler_session_id=current_session()
-        ORDER BY s.partition_id
+        SELECT worker_id, status
+        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +` s
+        WHERE worker_id is not null
+        QUALIFY 1=(row_number() OVER (PARTITION BY worker_id ORDER BY create_ts desc))
+        ORDER BY worker_id
     `;
-
-    loop_counter=0
+    var completed=0;
     while (true) {
-
-        counter=0;
-
-        // Get the status for each scheduled task (worker)
-
+        // Get the status for each scheduled worker
+        running=0;
         var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
         while (ResultSet.next()) {
             worker_id        = ResultSet.getColumnValue(1);
-            worker_session_id= ResultSet.getColumnValue(2);
-            worker_status    = ResultSet.getColumnValue(3);
+            worker_status    = ResultSet.getColumnValue(2);
             if (worker_status==STATUS_FAILURE) {
-                log("   WORKER "+worker_id+" FAILED" );
+                log("   WORKER ID "+worker_id+" FAILED" );
                 throw new Error("WORKER ID " +worker_id+ " FAILED") 
-            } else if (worker_status == STATUS_WAIT) {            
-                counter+=1;
-                log("   WAITING FOR WORKER "+worker_id+" TO START");
+            } else if (worker_status == STATUS_ASSIGNED) {            
+                running+=1;
+                log("   WORKER ID "+worker_id+" ASSIGNED");
             } else if (worker_status == STATUS_BEGIN) {
-                counter+=1;
+                running+=1;
                 log("   WORKER ID "+worker_id+" RUNNING");
             } else if (worker_status == STATUS_END)  {
                 log("   WORKER ID "+worker_id+" COMPLETED");
+                completed+=1;
+                worker_queue.unshift(worker_id)
+            } else if (worker_status == STATUS_IDLE)  {
+                log("   WORKER ID "+worker_id+" IDLE");
             } else {
                 log("UNKNOWN WORKER STATUS "+worker_status)
                 throw new Error("UNKNOWN WORKER STATUS "+worker_status+"; ABORT")
             }
-        }
+        } 
+
+        // assign next batch to workers having completed their work
+        assigned=0;
+        while(worker_queue.length>0){
+            assigned+=assign_next_batch(worker_queue.shift());
+        } 
 
         // break from the loop when all workers have completed 
         //   or wait another interval
         //   or throw an error if the timeout has been exceeded
 
-        if (counter<=0)  {
-            log("ALL WORKERS COMPLETED SUCCESSFULLY");
+        if ((running<=0) && (assigned <=0)) {
+            log("ALL WORKERS IDLE");
             break;
         } else {
             if (loop_counter<WORKER_TIMEOUT_COUNT) {
                 loop_counter+=1;
-                log("   WAITING FOR "+counter+" WORKERS TO COMPLETE; LOOP CNT "+loop_counter);
+                log("LOOP: "+loop_counter)
                 snowflake.execute({sqlText: "call /* "+loop_counter+" */ system$wait("+WAIT_TO_POLL+")"});
             } else {
                 throw new Error("MAX WAIT REACHED; ABORT");
@@ -388,82 +497,33 @@ function process_request (partition_count,table_count,table_name,row_count) {
     sqlquery=`
         DROP SCHEMA `+current_db+`.`+TMP_SCHEMA+`
     `;
-    snowflake.execute({sqlText: sqlquery});
-
-    log("procName: " + procName + " " + STATUS_END);
-    flush_log(STATUS_END);
-}
-
-// read the table parameter from the configuration in the SCHEDULER table
-//   and create the table accordingly
-
-function process_work(partition_id) {
-    var sqlquery="";
-    var table_name=""
-    var row_count=0;
-    var min_table_id=0;
-    var max_table_id=0;
-
-    sqlquery=`
-        SELECT table_name, row_count, min_table_id, max_table_id
-        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +`
-        WHERE partition_id = `+ partition_id +`
-    `;
-
-    var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
-
-    if (ResultSet.next()) {
-        table_name=ResultSet.getColumnValue(1);
-        row_count=ResultSet.getColumnValue(2);
-        min_table_id=ResultSet.getColumnValue(3);
-        max_table_id=ResultSet.getColumnValue(4);
-    } else {
-        throw new Error ("ERROR IN PARTITION "+partition_id);
-    }
-
-    for (i=min_table_id;i<=max_table_id;i++) {
-        log("   CREATE TABLE_"+i);
-        sqlquery=`
-            CREATE OR REPLACE /* `+("0000"+i.toString()).slice(-4)+` */ 
-                TABLE `+current_db+`.`+TABLE_SCHEMA+`.`+table_name+`_`+("0000"+i.toString()).slice(-4)+` AS
-                SELECT 
-                    randstr(16,random(11000)+`+partition_id+`)::varchar(128) s1
-                    ,randstr(16,random(12000)+`+partition_id+`)::varchar(128) s2
-                    ,randstr(16,random(13000)+`+partition_id+`)::varchar(128) s3
-                FROM TABLE(generator(rowcount=>`+row_count+`));
-        `; 
-        snowflake.execute({sqlText: sqlquery});
-    }
+    //snowflake.execute({sqlText: sqlquery});
 }
 
 // read the table parameters (name, # rows) from the configuration in the SCHEDULER table
 //   and create the table accordingly
 
 function start_worker (worker_id) {
-    const PARTITION_ID=worker_id;
 
     var sqlquery="";
-    var worker_session_id=0;
+    var batch_id=0;
+    var statement_id = 0;
 
-    // suspend the task to avoid it from being started again
+    log("GET WORK FOR WORKER: "+worker_id)
     sqlquery=`
-        ALTER TASK `+current_db+`.`+TMP_SCHEMA+`.`+TASK_NAME_WORKER+`_`+WORKER_ID+` suspend`;
+        INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
+                (scheduler_session_id, worker_session_id,worker_id, batch_id, status)
+            SELECT scheduler_session_id, current_session(),`+worker_id+`,batch_id,'`+STATUS_BEGIN+`'
+            FROM ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_STREAM + `_` + worker_id +`
+    `;
     snowflake.execute({sqlText: sqlquery});
 
     sqlquery=`
-        WITH worker_log 
-        AS (
-            SELECT partition_id, status, scheduler_session_id, session_id, create_ts
-            FROM ` + current_db + `.` + META_SCHEMA + `.` + LOG_TABLE + `
-            WHERE status in ('`+STATUS_BEGIN+`','`+STATUS_END+`','`+STATUS_FAILURE+`')
-                AND method = '`+METHOD_WORKER+`'
-            QUALIFY 1=(row_number() OVER (PARTITION BY scheduler_session_id,partition_id ORDER BY create_ts desc))
-        )           
-        SELECT s.scheduler_session_id,s.partition_id, nvl(l.session_id,0) worker_session_id
-        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +` s
-        LEFT OUTER JOIN worker_log l 
-            ON l.scheduler_session_id = s.scheduler_session_id AND l.partition_id=s.partition_id AND l.create_ts > s.create_ts
-        WHERE s.partition_id = `+PARTITION_ID+`
+        SELECT statement_id, task:"sqlquery"
+        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + ` s
+        INNER JOIN ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE + ` w
+            ON w.batch_id=s.batch_id
+        WHERE s.worker_session_id=current_session()
     `;
 
     var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
@@ -471,57 +531,67 @@ function start_worker (worker_id) {
     // check if the partition has already been executed by another task
     // if so return with a message, otherwise complete the assigned work
     
-    if(ResultSet.next()){
-        scheduler_session_id = ResultSet.getColumnValue(1);
-        worker_session_id=ResultSet.getColumnValue(3)
+    while (ResultSet.next()) {
+        statement_id=ResultSet.getColumnValue(1);
+        sqlquery = ResultSet.getColumnValue(2);
 
-        log("procName: " + procName + " " + STATUS_BEGIN);
-        flush_log(STATUS_BEGIN);
-
-        if (worker_session_id == 0) {
-            log("PROCESSING TASKS FOR SCHEDULER ID "+scheduler_session_id+" PARTITION "+PARTITION_ID);
-            process_work(PARTITION_ID);
-        } else {
-            log("PROCESSING FOR SCHEDULER ID "+scheduler_session_id+" PARTITION "+PARTITION_ID+" ALREADY DONE BY SESSION "+worker_session_id);
+        log("   EXECUTE STATEMENT: "+statement_id);
+        try {
+            snowflake.execute({sqlText: sqlquery});
         }
-
-        log("procName: " + procName + " " + STATUS_END);
-        flush_log(STATUS_END);
-        return return_array;
-    } else {
-        throw new Error ("PARTITION NOT FOUND")
+        catch (err) {
+            sqlquery=`
+                INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
+                    (scheduler_session_id, worker_session_id,worker_id, batch_id, status)
+                    SELECT scheduler_session_id, worker_session_id,worker_id,batch_id,'`+STATUS_FAILURE+`'
+                    FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
+                    WHERE worker_session_id=current_session()
+            `;
+            snowflake.execute({sqlText: sqlquery});
+            throw Error(err);
+        }
     }
+
+    sqlquery=`
+        INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
+                (scheduler_session_id, worker_session_id,worker_id, batch_id, status)
+            SELECT scheduler_session_id, worker_session_id,worker_id,batch_id,'`+STATUS_END+`'
+            FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
+            WHERE worker_session_id=current_session()
+    `;
+    snowflake.execute({sqlText: sqlquery});
 }
 
 try {
+
     init();
+
+    log("procName: " + procName + " " + STATUS_BEGIN);
+    flush_log(STATUS_BEGIN);
+
     if (METHOD==METHOD_PROCESS_REQUEST) {
-        process_request(PARTITION_COUNT,TABLE_COUNT,TABLE_NAME,ROW_COUNT);
+        worker_id=0;
+        process_request(CLUSTER_COUNT,STEPS_PER_BATCH);
     } else if (METHOD==METHOD_WORKER){
-        partition_id=WORKER_ID;
         start_worker(WORKER_ID)
     } else {
         throw new Error("REQUESTED METHOD NOT FOUND; "+METHOD);
     }
-    return return_array;
+
+    log("procName: " + procName + " " + STATUS_END);
+    flush_log(STATUS_END);
+    return return_array; 
 }
 catch (err) {
     log("ERROR found - MAIN try command");
     log("err.code: " + err.code);
     log("err.state: " + err.state);
     log("err.message: " + err.message);
-
-    try {
-        suspend_all_workers();
-        kill_all_running_worker_queries();
-    }
-    catch(err) {
-        log("err.code: " + err.code);
-        log("err.state: " + err.state);
-        log("err.message: " + err.message);
-    }
-
     flush_log(STATUS_FAILURE);
+
+    suspend_all_workers();
+    kill_all_running_worker_queries();
+
     return return_array;
 }
 $$;
