@@ -77,6 +77,20 @@ Note: While the framework processes one(1) request, it sets MIN_CLUSTER_COUNT to
     ```
 1. Run test for 1 worker thread, 10 tables, 100 million rows per table. This statement should run for about 12 minutes.
     ```
+    create or replace table meta_schema.test1 as 
+      select 
+      seq4() statement_id
+      ,parse_json ('{"TableDB":"CONCURRENCY_DEMO","TableSchema":"TABLE_SCHEMA","Table":"TABLE_'||lpad(statement_id,4,'0')||'"'
+                     ||',"rowcount":100000000,"sqlquery":['
+                     ||'"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
+                     ||' TABLE CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||' AS'
+                     ||' SELECT randstr(16,random(11000)+'||statement_id||')::varchar(128) s1 '
+                     ||'  ,randstr(16,random(12000)+'||statement_id||')::varchar(128) s2 '
+                     ||'  ,randstr(16,random(13000)+'||statement_id||')::varchar(128) s3 '
+                     ||' FROM TABLE(generator(rowcount=>100000000))"'
+                     ||']'
+                     ||'}') task
+      from  table(generator(rowcount=>10));
     call meta_schema.sp_concurrent('PROCESS_REQUEST',1,10,'TEST1');
     ```
 1. Check table meta_schema.log for the execution log after the call below completes. 
@@ -85,14 +99,42 @@ Note: While the framework processes one(1) request, it sets MIN_CLUSTER_COUNT to
     ```
 1. Run test for 2 worker threads, 10 tables, 100 million rows per table. This statement should run for about 6 minutes, i.e. double the resources for the same amount of work should yield half the run time. 
     ```
-    call meta_schema.sp_concurrent('PROCESS_REQUEST',2,5,'TEST2);
+    call meta_schema.sp_concurrent('PROCESS_REQUEST',2,5,'TEST1');
     ```
 1. Run test for 5 worker thread, 50 tables (!), 100 million rows per table. This statement should run for about 12 minutes, i.e. 5 times the resouces for 5 times the work should yield about the same run time as the first test. This test creates about 1/4 a TB of data and consumes about 1 credit.
     ```
+    create or replace table meta_schema.test3 as 
+      select 
+      seq4() statement_id
+      ,parse_json ('{"TableDB":"CONCURRENCY_DEMO","TableSchema":"TABLE_SCHEMA","Table":"TABLE_'||lpad(statement_id,4,'0')||'"'
+                     ||',"rowcount":100000000,"sqlquery":['
+                     ||'"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
+                     ||' TABLE CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||' AS'
+                     ||' SELECT randstr(16,random(11000)+'||statement_id||')::varchar(128) s1 '
+                     ||'  ,randstr(16,random(12000)+'||statement_id||')::varchar(128) s2 '
+                     ||'  ,randstr(16,random(13000)+'||statement_id||')::varchar(128) s3 '
+                     ||' FROM TABLE(generator(rowcount=>100000000))"'
+                     ||']'
+                     ||'}') task
+      from  table(generator(rowcount=>50));    
     call meta_schema.sp_concurrent('PROCESS_REQUEST',5,10,'TEST3);
     ```
 1. Run test for 10 worker thread, 100 tables (!), 100 million rows per table. This statement should run for about 12 minutes, i.e. 10 times the resources for 10 times the work should yield about the same run time as the first test. This test creates about 1/2 a TB of data and consumes about 2 credits.
     ```
+    create or replace table meta_schema.test4 as 
+      select 
+      seq4() statement_id
+      ,parse_json ('{"TableDB":"CONCURRENCY_DEMO","TableSchema":"TABLE_SCHEMA","Table":"TABLE_'||lpad(statement_id,4,'0')||'"'
+                     ||',"rowcount":100000000,"sqlquery":['
+                     ||'"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
+                     ||' TABLE CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||' AS'
+                     ||' SELECT randstr(16,random(11000)+'||statement_id||')::varchar(128) s1 '
+                     ||'  ,randstr(16,random(12000)+'||statement_id||')::varchar(128) s2 '
+                     ||'  ,randstr(16,random(13000)+'||statement_id||')::varchar(128) s3 '
+                     ||' FROM TABLE(generator(rowcount=>100000000))"'
+                     ||']'
+                     ||'}') task
+      from  table(generator(rowcount=>100));
     call meta_schema.sp_concurrent('PROCESS_REQUEST',10,10,'TEST4');
     ```
 
