@@ -12,7 +12,7 @@ The sample code takes 4 input parameters.
 
 The framework implements a simple model for an [Embarrassingly parallel](https://en.wikipedia.org/wiki/Embarrassingly_parallel) problem. The statements to be executed are read from a configuration table. The configuration table has an ID (statement_id) and a JSON document in a variant column. The actual sql statement is defined in an array called sqlquery. As in the example below, you can submit multiple sql statements within the arrary. 
 
-    ```
+```
     create or replace table meta_schema.statements as 
     select 
     seq4() statement_id
@@ -33,7 +33,7 @@ The framework implements a simple model for an [Embarrassingly parallel](https:/
                          ||']'
                          ||'}') task
     from  table(generator(rowcount=>100));
-    ```
+```
 
 ## Set up
 To run the sample code in your environment perform the following steps. It is assumed that the user running the set up and executes the code has the necessary permissions. This could be ACCOUNTADMIN or a custom role that has the following permissions.
