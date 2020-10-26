@@ -2,17 +2,37 @@
 Framework for processing work concurrently via Snowflake JS stored proc 
 
 
-[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a multithreading for parallel or concurrent execution, i.e. a snowflake stored procedures can not start additional processes. At least not directly. Luckily this doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate parallel code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to partition the total amount of work into N partitions. Each partition of work will be handled by 1 task. Multiple tasks can execute on a single cluster. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is reached. Cross process communiction can be accomplished by messages in a logging table.
+[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a multithreading for parallel or concurrent execution, i.e. a snowflake stored procedures can not start additional processes. At least not directly. Luckily this doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate parallel code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to partition the total amount of work into N batches/chunks. Each batch of work will be handled by 1 task. Multiple tasks can execute on a single cluster. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is reached. Cross process communiction can be accomplished by messages in a logging table.
 
 The sample code takes 4 input parameters.
 * method name ('PROCESS_REQUEST') 
-* number of partitions
-* number of tables to be created
-* number of rows to be created per table
+* number of worker processes
+* number of statements per batch
+* name of inputput table 
 
-It implements a simple model for an [Embarrassingly parallel](https://en.wikipedia.org/wiki/Embarrassingly_parallel) problem. To adapt the sample code for your own processing, you have to 
-* define how to partition the total amount of work into N partitions of approx the same amount of work (measured in execution time)
-* define how to execute the work for each partition
+The framework implements a simple model for an [Embarrassingly parallel](https://en.wikipedia.org/wiki/Embarrassingly_parallel) problem. The statements to be executed are read from a configuration table. The configuration table has an ID (statement_id) and a JSON document in a variant column. The actual sql statement is defined in an array called sqlquery. As in the example below, you can submit multiple sql statements within the arrary. 
+    ```
+    create or replace table meta_schema.statements as 
+    select 
+    seq4() statement_id
+    ,parse_json ('{"TableDB":"CONCURRENCY_DEMO","TableSchema":"TABLE_SCHEMA","Table":"TABLE_'||lpad(statement_id,4,'0')||'"'
+                         ||',"rowcount":100000000,"sqlquery":['
+                         ||'"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
+                         ||' TABLE CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||' AS'
+                         ||' SELECT randstr(16,random(11000)+'||statement_id||')::varchar(128) s1 '
+                         ||'  ,randstr(16,random(12000)+'||statement_id||')::varchar(128) s2 '
+                         ||'  ,randstr(16,random(13000)+'||statement_id||')::varchar(128) s3 '
+                         ||' FROM TABLE(generator(rowcount=>100000000))"'
+                         ||',"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
+                         ||' SECURE VIEW CONCURRENCY_DEMO.TABLE_SCHEMA.VIEW_'||lpad(statement_id,4,'0')||' AS'
+                         ||' SELECT * FROM CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||'"'
+                         ||',"GRANT  /* '||lpad(statement_id,4,'0')||' */ '
+                         ||' SELECT ON VIEW CONCURRENCY_DEMO.TABLE_SCHEMA.VIEW_'||lpad(statement_id,4,'0')
+                         ||' TO SHARE CONCURRENCY_DEMO_SHARE "'               
+                         ||']'
+                         ||'}') task
+    from  table(generator(rowcount=>100));
+    ```
 
 ## Set up
 To run the sample code in your environment perform the following steps. It is assumed that the user running the set up and executes the code has the necessary permissions. This could be ACCOUNTADMIN or a custom role that has the following permissions.

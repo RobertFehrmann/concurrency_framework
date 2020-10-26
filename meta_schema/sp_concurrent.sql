@@ -12,19 +12,18 @@ $$
 //             The stored procedure accepts the following methods:
 //                PROCESS_REQUEST: 
 //                   Parameters:
-//                       METHOD_PARAM_1: #of partitions to create. Each partition will be executed by one worker
-//                       METHOD_PARAM_2: #of tables to create 
-//                       METHOD_PARAM_3: #of rows per table
-//                   This method is the scheduler (coordinator) method. It divides the total number of tables into 
-//                   equal partitions (number of tables) per worker and stores instructions in the SCHEDULER table.
-//                   Then it creates one task(worker) per partition 
-//                   and waits until all workers complete or a maximum wait time has passed.
+//                       METHOD_PARAM_2: #of workers to create. 
+//                       METHOD_PARAM_3: #of statements per batch 
+//                       METHOD_PARAM_4: name of the table holding the statements to be executed
+//                   This method is the scheduler (coordinator) method. It takes the input table (parameter 4) and 
+//                   divides the total number of statements into  equal partitions (batches/chunks) of the requested size. 
+//                   Then it creates the requested number of task(worker)  
+//                   and waits until all workers complete all of their batches or the maximum wait time has passed.
 //                WORKER: The worker method performs the actual work. It creates the tables based on the configuration
 //                   in the SCHEDULER table.
 //             Process coordination is accomplished via the SCHEDULER and the LOG tables.
 //
-//             To show the framework in action the sample code here shows how to create and generate data for a set
-//             of tables by creating a configurable number of parallel tasks
+//             The statements to be executed are store in JSON format. The framework is looking for an attribute called 'sqlquery'
 // -----------------------------------------------------------------------------
 // Modification History
 //
@@ -34,6 +33,7 @@ $$
 // Copyright (c) 2020 Snowflake Inc. All rights reserved
 // -----------------------------------------------------------------------------
 
+const TIMEZONE='UTC';
 
 // copy parameters into local constant; none of the input values can be modified
 const METHOD= I_METHOD;
@@ -115,7 +115,7 @@ function flush_log (status){
             sqlquery=`
                 CREATE TABLE IF NOT EXISTS `+ current_db + `.` + META_SCHEMA + `.` + LOG_TABLE + ` (
                     id integer AUTOINCREMENT (0,1)
-                    ,create_ts timestamp_tz(9) default current_timestamp
+                    ,create_ts timestamp_tz(9) default convert_timezone('`+TIMEZONE+`',current_timestamp)
                     ,session_id number default to_number(current_session())
                     ,method varchar
                     ,status varchar
@@ -361,7 +361,7 @@ function process_request (cluster_count,steps_per_batch) {
             ,worker_id integer
             ,batch_id integer
             ,status varchar
-            ,create_ts timestamp_tz(9) default current_timestamp() )
+            ,create_ts timestamp_tz(9) default convert_timezone('`+TIMEZONE+`',current_timestamp))
         `;
     snowflake.execute({sqlText: sqlquery});                  
 
@@ -418,7 +418,6 @@ function process_request (cluster_count,steps_per_batch) {
     // the creation of all clusters needed.
     if (worker_count>0) {
         set_min_cluster_count(worker_count);
-        set_min_cluster_count(1); 
     } 
 
     //initialize worker array of open worker slots
@@ -426,7 +425,7 @@ function process_request (cluster_count,steps_per_batch) {
 
     assigned=0;
     for (var i=1; i<=worker_count;i++) {
-        assigned+=assign_next_batch(i);
+        assigned+=assign_next_batch(i); 
     }
     log("ASSIGNED "+assigned+" BATCHES; CLUSTER COUNT: "+worker_count);
 
@@ -494,6 +493,8 @@ function process_request (cluster_count,steps_per_batch) {
         }                   
     } 
 
+    set_min_cluster_count(1); 
+
     sqlquery=`
         DROP SCHEMA `+current_db+`.`+TMP_SCHEMA+`
     `;
@@ -519,10 +520,11 @@ function start_worker (worker_id) {
     snowflake.execute({sqlText: sqlquery});
 
     sqlquery=`
-        SELECT statement_id, task:"sqlquery"
+        SELECT statement_id, index, value
         FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + ` s
         INNER JOIN ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE + ` w
             ON w.batch_id=s.batch_id
+            , lateral flatten (input => task:sqlquery) t
         WHERE s.worker_session_id=current_session()
     `;
 
@@ -533,9 +535,10 @@ function start_worker (worker_id) {
     
     while (ResultSet.next()) {
         statement_id=ResultSet.getColumnValue(1);
-        sqlquery = ResultSet.getColumnValue(2);
+        index_id = ResultSet.getColumnValue(2);
+        sqlquery = ResultSet.getColumnValue(3);
 
-        log("   EXECUTE STATEMENT: "+statement_id);
+        log("   EXECUTE STATEMENT: "+statement_id+" INDEX "+index_id);
         try {
             snowflake.execute({sqlText: sqlquery});
         }
@@ -587,6 +590,9 @@ catch (err) {
     log("err.code: " + err.code);
     log("err.state: " + err.state);
     log("err.message: " + err.message);
+
+    set_min_cluster_count(1); 
+
     flush_log(STATUS_FAILURE);
 
     suspend_all_workers();
