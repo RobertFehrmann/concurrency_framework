@@ -99,6 +99,14 @@ For testing purposes, i.e. to see the impact of executing a set of statements co
     ```
     call meta_schema.sp_concurrent('PROCESS_REQUEST',2,5,'TEST1');
     ```
+    You can observe progress of the different worker process via the following query
+    ```
+    select worker_id,worker_session_id, batch_id,status,datediff(s,create_ts,current_timestamp) run_time
+    from concurrency_demo.tmp_schema.scheduler 
+    where worker_id is not null
+    qualify 1=(row_number() over (partition by worker_id order by create_ts desc) )
+    order by batch_id ;
+    ```
 1. Run test for 5 worker thread, 50 tables (!), 100 million rows per table. This statement should run for about 12 minutes, i.e. 5 times the resouces for 5 times the work should yield about the same run time as the first test. This test creates about 1/4 a TB of data and consumes about 1 credit.
     ```
     create or replace table meta_schema.test3 as 

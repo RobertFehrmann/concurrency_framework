@@ -1,7 +1,7 @@
 create or replace procedure META_SCHEMA.SP_CONCURRENT(I_METHOD VARCHAR,I_METHOD_PARAM_1 float, I_METHOD_PARAM_2 float, I_METHOD_PARAM_3 VARCHAR)
     returns ARRAY
     language JAVASCRIPT
-    execute as caller
+    execute as owner
 as
 $$
 // -----------------------------------------------------------------------------
@@ -10,20 +10,30 @@ $$
 // Purpose     SP_CONCURRENT is a "library" of functions to perform the work for a embarrassingly parallel
 //             problem. 
 //             The stored procedure accepts the following methods:
+// 
 //                PROCESS_REQUEST: 
 //                   Parameters:
-//                       METHOD_PARAM_2: #of workers to create. 
-//                       METHOD_PARAM_3: #of statements per batch 
-//                       METHOD_PARAM_4: name of the table holding the statements to be executed
+//                       I_METHOD: 'PROCESS_REQUEST'
+//                       I_METHOD_PARAM_1: #of workers to create. 
+//                       I_METHOD_PARAM_2: #of statements per batch 
+//                       I_METHOD_PARAM_3: name of the table holding the statements to be executed
 //                   This method is the scheduler (coordinator) method. It takes the input table (parameter 4) and 
 //                   divides the total number of statements into  equal partitions (batches/chunks) of the requested size. 
 //                   Then it creates the requested number of task(worker)  
 //                   and waits until all workers complete all of their batches or the maximum wait time has passed.
-//                WORKER: The worker method performs the actual work. It creates the tables based on the configuration
-//                   in the SCHEDULER table.
+//
+//                WORKER: 
+//                   Parameters:
+//                       I_METHOD: 'WORKER'
+//                       I_METHOD_PARAM_1: worker ID. 
+//                       I_METHOD_PARAM_2: batch ID 
+//                       I_METHOD_PARAM_3: scheduler session ID
+//                    The worker method performs the actual work. It executes the statements by batch. 
+//
 //             Process coordination is accomplished via the SCHEDULER and the LOG tables.
 //
-//             The statements to be executed are store in JSON format. The framework is looking for an attribute called 'sqlquery'
+//             The statements to be executed are store in JSON format in the input table reference passed as METHOD_PARAMETER_4 
+//                 of the PROCESS_REQUEST call. 
 // -----------------------------------------------------------------------------
 // Modification History
 //
@@ -41,6 +51,8 @@ const CLUSTER_COUNT=I_METHOD_PARAM_1;
 const STEPS_PER_BATCH=I_METHOD_PARAM_2;
 const INPUT_TABLE=I_METHOD_PARAM_3;
 const WORKER_ID=I_METHOD_PARAM_1;
+const BATCH_ID=I_METHOD_PARAM_2;
+const SCHEDULER_SESSION_ID=I_METHOD_PARAM_3;
 
 
 // keep all constants in a common place
@@ -64,8 +76,6 @@ const LOG_TABLE="LOG";
 const SCHEDULER_TABLE="SCHEDULER"
 const WORK_TABLE="WORK";
 const WORKER_TABLE="WORKER";
-const TASK_TABLE="TASK";
-const TASK_STREAM="STREAM_TASK";
 
 // Worker timeout and polling interval
 WORKER_TIMEOUT_COUNT=720;
@@ -76,8 +86,7 @@ TASK_TIMEOUT=10800000;
 var current_db="";
 var current_warehouse="";
 var return_array = [];
-var scheduler_session_id=0;
-var session_id=0;
+var current_session_id=0;
 
 var this_name = Object.keys(this)[0];
 var procName = this_name + "-" + METHOD;
@@ -141,7 +150,7 @@ function init () {
     if (ResultSet.next()) {
         current_warehouse=ResultSet.getColumnValue(1);
         current_db=ResultSet.getColumnValue(2);
-        session_id=ResultSet.getColumnValue(3);
+        current_session_id=ResultSet.getColumnValue(3);
     } else {
         throw new Error ("INIT FAILURE");
     }
@@ -202,43 +211,35 @@ function kill_all_running_worker_queries() {
 
         log("      FIND RUNNING QUERIES FOR WORKER ID: "+worker_id+" SESSION_ID: "+worker_session_id);
 
-        sqlquery2=`
-            SELECT query_id 
-            FROM table(information_schema.query_history_by_session(SESSION_ID=>`+worker_session_id+`,RESULT_LIMIT=>1000))
-            WHERE execution_status='RUNNING'
-            ORDER BY start_time DESC;
-        `;
-        var ResultSet2 = (snowflake.createStatement({sqlText:sqlquery2})).execute();
-        while (ResultSet2.next()) {
-            query_id = ResultSet2.getColumnValue(1);
-
-            log("         CANCEL QUERY: "+query_id);
-
-            sqlquery3=`
-                SELECT SYSTEM$CANCEL_QUERY('`+query_id+`')
+        try {
+            sqlquery2=`
+                SELECT query_id 
+                FROM table(information_schema.query_history_by_session(SESSION_ID=>`+worker_session_id+`,RESULT_LIMIT=>1000))
+                WHERE execution_status='RUNNING'
+                ORDER BY start_time DESC;
             `;
-            snowflake.execute({sqlText:  sqlquery3});
+            var ResultSet2 = (snowflake.createStatement({sqlText:sqlquery2})).execute();
+            while (ResultSet2.next()) {
+                query_id = ResultSet2.getColumnValue(1);
+
+                log("         CANCEL QUERY: "+query_id);
+
+                sqlquery3=`
+                    SELECT SYSTEM$CANCEL_QUERY('`+query_id+`')
+                `;
+                snowflake.execute({sqlText:  sqlquery3});
+            }
+        }
+        catch (err) {
+            log("      WORKER SESSION NOT FOUND:" + worker_session_id);
         }
     }
 }
 
 // -----------------------------------------------------------------------------
-//  pre-allocate compute tier
+//  assign the next available to a worker that has completed its previous batch.
 // -----------------------------------------------------------------------------
-function set_min_cluster_count(cnt) {
-    var sqlquery="";
-    var batch_id=0;
-
-    log("SET MIN_CLUSTER_COUNT: "+cnt);
-
-    sqlquery=`
-        ALTER WAREHOUSE `+current_warehouse+`
-        SET MIN_CLUSTER_COUNT=`+cnt+` 
-    `;
-    snowflake.execute({sqlText:  sqlquery});
-}
-
-function assign_next_batch(worker_id) {
+function assign_next_batch(worker_id,scheduler_session_id) {
     var sqlquery="";
     var batch_id=0;
 
@@ -264,55 +265,28 @@ function assign_next_batch(worker_id) {
         batch_id=ResultSet.getColumnValue(1);
         log("   BATCH_ID: "+batch_id) 
 
-        for (var i=0;i<2;i++) {
-            try {
-                sqlquery=`
-                    INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_TABLE+ `_` + worker_id +`
-                        VALUES (current_session(),`+batch_id+`,`+worker_id+`)         
-                    `;
-                snowflake.execute({sqlText:  sqlquery});
+        sqlquery=`
+            INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
+                    (scheduler_session_id, batch_id, worker_id, status)
+                VALUES (current_session(), `+batch_id+`,`+worker_id+`,'`+STATUS_ASSIGNED+`')
+        `;
+        snowflake.execute({sqlText:  sqlquery});
 
-                sqlquery=`
-                    INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
-                            (scheduler_session_id, batch_id, worker_id, status)
-                        VALUES (current_session(), `+batch_id+`,`+worker_id+`,'`+STATUS_ASSIGNED+`')
-                `;
-                snowflake.execute({sqlText:  sqlquery});
-                break;
-            }
-            catch (err) {
-                log("   CREATE TABLE/STREAM/TASK FOR WORKER: "+worker_id)
-                sqlquery=`
-                    CREATE OR REPLACE TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_TABLE+ `_` + worker_id +` (
-                        scheduler_session_id integer
-                        ,batch_id integer
-                        ,worker_id integer) 
-                `;
-                snowflake.execute({sqlText:  sqlquery});
-                
-                sqlquery=`
-                    CREATE OR REPLACE STREAM ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_STREAM + `_` + worker_id +` 
-                        ON TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_TABLE+ `_` + worker_id +` 
-                `;
-                snowflake.execute({sqlText:  sqlquery});
-
-                sqlquery=`
-                    CREATE OR REPLACE TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id +`
-                        WAREHOUSE =  `+current_warehouse+`
-                        USER_TASK_TIMEOUT_MS = `+TASK_TIMEOUT+`
-                        SCHEDULE= '1 MINUTE' 
-                        WHEN SYSTEM$STREAM_HAS_DATA('` + current_db + `.` + TMP_SCHEMA + `.` + TASK_STREAM + `_` + worker_id +`')
-                    AS call `+current_db+`.`+META_SCHEMA+`.`+this_name+`('`+METHOD_WORKER+`',`+worker_id+`,null,null)
-                `;
-                snowflake.execute({sqlText:  sqlquery});
-                
-                sqlquery=`
-                    ALTER TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + ` resume
-                `;
-                snowflake.execute({sqlText:  sqlquery});
-            }
-            assigned=1;
-        }   
+        sqlquery=`
+            CREATE OR REPLACE TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id +`
+                WAREHOUSE =  `+current_warehouse+`
+                USER_TASK_TIMEOUT_MS = `+TASK_TIMEOUT+`
+                SCHEDULE= '1 MINUTE' 
+            AS call `+current_db+`.`+META_SCHEMA+`.`+this_name+`('`+METHOD_WORKER+`',`+worker_id+`,`+batch_id+`,'`+scheduler_session_id+`')
+        `;
+        snowflake.execute({sqlText:  sqlquery});
+        
+        sqlquery=`
+            ALTER TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + ` resume
+        `;
+        snowflake.execute({sqlText:  sqlquery});
+        
+        assigned=1;  
     } else {
         log("   ALL BATCHES PROCESSED; WORKER IDLE")
         sqlquery=`
@@ -334,7 +308,7 @@ function assign_next_batch(worker_id) {
 }
 
 // -----------------------------------------------------------------------------
-//  read environment values
+//  process the request; 
 // -----------------------------------------------------------------------------
 function process_request (cluster_count,steps_per_batch) {
     var sqlquery="";
@@ -379,7 +353,7 @@ function process_request (cluster_count,steps_per_batch) {
         throw new Error("INPUT_TABLE "+ INPUT_TABLE +" IN SCHEMA "+meta_schema+" NOT FOUND")
     }
 
-    //partition work
+    // batch total amount of work into batches of steps_per_batch
     sqlquery=`
         CREATE OR REPLACE TABLE ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE +` AS
             SELECT trunc(seq4()/`+steps_per_batch+`)+1 batch_id, statement_id, task
@@ -387,6 +361,7 @@ function process_request (cluster_count,steps_per_batch) {
         `;
     snowflake.execute({sqlText: sqlquery});
     
+    // create one row per batch in the scheduler table
     sqlquery=`
         INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ ` 
                 (scheduler_session_id,batch_id,status)
@@ -396,7 +371,8 @@ function process_request (cluster_count,steps_per_batch) {
     `;
     snowflake.execute({sqlText: sqlquery});
 
- 
+    // pre-allocate the number of requested workers or 1 worker per batch if
+    // there are not enough batches for the number of requested workers
     sqlquery=`
         SELECT count(distinct batch_id)
         FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE+ `
@@ -414,25 +390,16 @@ function process_request (cluster_count,steps_per_batch) {
         throw new Error ("NO WORKER FOUND")
     }
 
-    // pre-allocate one cluster per task (partition) and reset it to 1; This is just to jump-start
-    // the creation of all clusters needed.
-    if (worker_count>0) {
-        set_min_cluster_count(worker_count);
-    } 
-
     //initialize worker array of open worker slots
     worker_queue=[];
 
     assigned=0;
     for (var i=1; i<=worker_count;i++) {
-        assigned+=assign_next_batch(i); 
+        assigned+=assign_next_batch(i,current_session_id);
     }
     log("ASSIGNED "+assigned+" BATCHES; CLUSTER COUNT: "+worker_count);
 
-    // when a task starts it puts a record with status BEGIN into the logging table
-    // when a task completes it put another record record with status COMPLETE (success) 
-    //   or failure into the logging table.
-
+    // query to get the latest status for each worker
     sqlquery=`
         SELECT worker_id, status
         FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE +` s
@@ -472,7 +439,7 @@ function process_request (cluster_count,steps_per_batch) {
         // assign next batch to workers having completed their work
         assigned=0;
         while(worker_queue.length>0){
-            assigned+=assign_next_batch(worker_queue.shift());
+            assigned+=assign_next_batch(worker_queue.shift(),current_session_id);
         } 
 
         // break from the loop when all workers have completed 
@@ -493,45 +460,42 @@ function process_request (cluster_count,steps_per_batch) {
         }                   
     } 
 
-    set_min_cluster_count(1); 
-
     sqlquery=`
         DROP SCHEMA `+current_db+`.`+TMP_SCHEMA+`
     `;
     //snowflake.execute({sqlText: sqlquery});
 }
 
-// read the table parameters (name, # rows) from the configuration in the SCHEDULER table
-//   and create the table accordingly
-
-function start_worker (worker_id) {
+// -----------------------------------------------------------------------------
+//  process a batch;  
+// -----------------------------------------------------------------------------
+function process_batch (worker_id, batch_id, scheduler_session_id) {
 
     var sqlquery="";
-    var batch_id=0;
     var statement_id = 0;
 
-    log("GET WORK FOR WORKER: "+worker_id)
+    log("GET WORK FOR WORKER: "+worker_id);
+
+    sqlquery=`
+        ALTER TASK ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_NAME_WORKER + `_` + worker_id + ` suspend
+    `;
+    snowflake.execute({sqlText:  sqlquery});
+
     sqlquery=`
         INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
                 (scheduler_session_id, worker_session_id,worker_id, batch_id, status)
-            SELECT scheduler_session_id, current_session(),`+worker_id+`,batch_id,'`+STATUS_BEGIN+`'
-            FROM ` + current_db + `.` + TMP_SCHEMA + `.` + TASK_STREAM + `_` + worker_id +`
+            VALUES (`+scheduler_session_id+`, current_session(),`+worker_id+`,`+batch_id+`,'`+STATUS_BEGIN+`')
     `;
     snowflake.execute({sqlText: sqlquery});
 
     sqlquery=`
         SELECT statement_id, index, value
-        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + ` s
-        INNER JOIN ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE + ` w
-            ON w.batch_id=s.batch_id
+        FROM ` + current_db + `.` + TMP_SCHEMA + `.` + WORK_TABLE + ` 
             , lateral flatten (input => task:sqlquery) t
-        WHERE s.worker_session_id=current_session()
+        WHERE batch_id=`+batch_id+`
     `;
 
     var ResultSet = (snowflake.createStatement({sqlText:sqlquery})).execute();
-
-    // check if the partition has already been executed by another task
-    // if so return with a message, otherwise complete the assigned work
     
     while (ResultSet.next()) {
         statement_id=ResultSet.getColumnValue(1);
@@ -543,6 +507,7 @@ function start_worker (worker_id) {
             snowflake.execute({sqlText: sqlquery});
         }
         catch (err) {
+            // report a failure message to the scheduler
             sqlquery=`
                 INSERT INTO ` + current_db + `.` + TMP_SCHEMA + `.` + SCHEDULER_TABLE + `
                     (scheduler_session_id, worker_session_id,worker_id, batch_id, status)
@@ -573,10 +538,9 @@ try {
     flush_log(STATUS_BEGIN);
 
     if (METHOD==METHOD_PROCESS_REQUEST) {
-        worker_id=0;
         process_request(CLUSTER_COUNT,STEPS_PER_BATCH);
     } else if (METHOD==METHOD_WORKER){
-        start_worker(WORKER_ID)
+        process_batch(WORKER_ID,BATCH_ID,SCHEDULER_SESSION_ID)
     } else {
         throw new Error("REQUESTED METHOD NOT FOUND; "+METHOD);
     }
@@ -590,9 +554,6 @@ catch (err) {
     log("err.code: " + err.code);
     log("err.state: " + err.state);
     log("err.message: " + err.message);
-
-    set_min_cluster_count(1); 
-
     flush_log(STATUS_FAILURE);
 
     suspend_all_workers();
