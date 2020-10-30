@@ -10,7 +10,10 @@ The sample code takes 4 input parameters.
 * number of statements per batch
 * name of inputput table 
 
-The input table provides the SQL statements to be executed. It has an ID (statement_id) and a JSON document in a variant column. The actual sql statement is defined in an array called sqlquery. As in the example below, you can submit multiple sql statements within the arrary. 
+The input table provides the SQL statements to be executed. It has an ID (statement_id) and a JSON document in a variant column (sqlquery). Both names are hard coded and any input table to the framework has to have those 2 attributes. 
+The actual sql statement is defined in an array called sqlquery. As in the example below, you can submit multiple sql statements within the arrary. 
+
+
 ```
 create or replace table meta_schema.statements as 
 select 
