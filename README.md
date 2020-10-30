@@ -2,18 +2,21 @@
 Framework for processing work concurrently via Snowflake JS stored proc 
 
 
-[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a multithreading for parallel or concurrent execution, i.e. a snowflake stored procedures can not start additional processes. At least not directly. Luckily this doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate parallel code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to partition the total amount of work into N batches/chunks. Each batch of work will be handled by 1 task. Multiple tasks can execute on a single cluster. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is reached. Cross process communiction can be accomplished by messages in a logging table.
+[Snowflake stored procedures](https://docs.snowflake.com/en/sql-reference/stored-procedures-overview.html) use JavaScript to express complex logic. As of version 4.32.1, Snowflake stored procedures do not support a multithreading for parallel or concurrent execution, i.e. a snowflake stored procedures can not start additional processes. At least not directly. Luckily this doesn't mean, we couldn't execute a workfload in parallel. The sample code here shows how a single stored procedure can initiate parallel code execution by using [Snowflake Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro.html). The idea is to batch/chunk the total amount of work into N batches/chunks. Each batch of work will be handled by 1 task. Multiple tasks can execute on different clusters in the same multi-cluster warehouse. Snowflake will automatically scale out when queuing occurs after MAX_CONCURRENCY_LEVEL (see below) is exceeded. Cross process communiction is accomplished by creating messages in a logging table.
 
-The sample code takes 4 input parameters.
+The stored procedure used to distribute the workload takes 4 input parameters.
 * method name ('PROCESS_REQUEST') 
 * number of worker processes
 * number of statements per batch
 * name of inputput table 
 
+If the individual statements have a small runtime variance, then we should split the total amount of statements by the number of worker processes. This has the benefit of incurring the startup overhead only once. In contrast, if there is a high variance in execution time per statement, and the number of statements is considerably higher then the number of worker nodes, then it is benefical to send the work to the worker processes in smaller batches. This way, worker nodes do not sit idle because statements may already have been assigned to an already busy worker node. Optimizing the parameters, e.g. testing different parameter configuration can yield major reductions in run-time.
+
 The input table provides the SQL statements to be executed. It has an ID (statement_id) and a JSON document in a variant column (sqlquery). Both names are hard coded and any input table to the framework has to have those 2 attributes. 
 
-The actual sql statement is defined in an array called sqlquery. The example below shows for instance how to get a list of statements to script all roles in an account into a table. 
+In some instances certain statements need to be executed sequentially (like in the sample below). We first execute a "show" which is immediately followed by a result_scan. To support this type of pattern, you define the sql statements in an array.
 
+The example below shows for instance how to get a list of statements to script all roles in an account into a table. 
 
 ```
 select 
