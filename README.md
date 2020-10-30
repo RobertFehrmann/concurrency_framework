@@ -11,31 +11,22 @@ The sample code takes 4 input parameters.
 * name of inputput table 
 
 The input table provides the SQL statements to be executed. It has an ID (statement_id) and a JSON document in a variant column (sqlquery). Both names are hard coded and any input table to the framework has to have those 2 attributes. 
-The actual sql statement is defined in an array called sqlquery. As in the example below, you can submit multiple sql statements within the arrary. 
+
+The actual sql statement is defined in an array called sqlquery. The example below shows for instance how to get a list of statements to script all roles in an account into a table. 
 
 
 ```
-create or replace table meta_schema.statements as 
 select 
 seq4() statement_id
-,parse_json ('{"TableDB":"CONCURRENCY_DEMO","TableSchema":"TABLE_SCHEMA","Table":"TABLE_'||lpad(statement_id,4,'0')||'"'
-                     ||',"rowcount":100000000,"sqlquery":['
-                     ||'"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
-                     ||' TABLE CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||' AS'
-                     ||' SELECT randstr(16,random(11000)+'||statement_id||')::varchar(128) s1 '
-                     ||'  ,randstr(16,random(12000)+'||statement_id||')::varchar(128) s2 '
-                     ||'  ,randstr(16,random(13000)+'||statement_id||')::varchar(128) s3 '
-                     ||' FROM TABLE(generator(rowcount=>100000000))"'
-                     ||',"CREATE OR REPLACE /* '||lpad(statement_id,4,'0')||' */ '
-                     ||' SECURE VIEW CONCURRENCY_DEMO.TABLE_SCHEMA.VIEW_'||lpad(statement_id,4,'0')||' AS'
-                     ||' SELECT * FROM CONCURRENCY_DEMO.TABLE_SCHEMA.TABLE_'||lpad(statement_id,4,'0')||'"'
-                     ||',"GRANT  /* '||lpad(statement_id,4,'0')||' */ '
-                     ||' SELECT ON VIEW CONCURRENCY_DEMO.TABLE_SCHEMA.VIEW_'||lpad(statement_id,4,'0')
-                     ||' TO SHARE CONCURRENCY_DEMO_SHARE "'               
+,parse_json ('{"Role":"'||"name"||'"'
+                     ||',"sqlquery":['
+                     ||'"SHOW GRANTS TO ROLE '||"name"||'"'
+                     ||',"INSERT INTO concurrency_demo.roles.roles_snapshot SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))"'
                      ||']'
                      ||'}') task
-from  table(generator(rowcount=>100));
+from  table(result_scan(last_query_id()));
 ```
+
 ## Set up
 To run the sample code in your environment perform the following steps. It is assumed that the user running the set up and executes the code has the necessary permissions. This could be ACCOUNTADMIN or a custom role that has the following permissions.
     ```
@@ -43,8 +34,7 @@ To run the sample code in your environment perform the following steps. It is as
     CREATE DATABASE
     EXECUTE TASK
     ```
-1. Create a warehouse. The concurrency level is reduced to 2 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger size and or more clusters, and or a different MAX_CONCURRENCY_LEVEL. Adjust the parameters accordingly. 
-Note: While the framework processes one(1) request, it sets MIN_CLUSTER_COUNT to the number of requested partitions. Doing so ensures that there is one cluster available for each partition.   
+1. Create a warehouse. The concurrency level is reduced to 2 to ensure that the individual cluster isn't overloaded before Snowflake scales out. The Warehouse_size is set to XSMALL. Your specific use-case may require a bigger warehouse size and or more clusters. Modifying MAX_CONCURRENCY_LEVEL may also be beneficial. As a rule of thumb, start small and test different parameters for your workload.   
     ```
     create warehouse concurrency_demo with
        WAREHOUSE_SIZE = XSMALL
@@ -71,6 +61,8 @@ Note: While the framework processes one(1) request, it sets MIN_CLUSTER_COUNT to
     ```
 
 ## Testing
+
+For testing purposes, i.e. to see the impact of executing a set of statements concurrently, we will simulate a high IO intensive workload by creating multiple tables with 100 million rows each. 
 
 1. Open a new worksheet and set your context, either from the drop downs in your worksheet or by running the commands below.  
     ```
