@@ -1,7 +1,7 @@
 create or replace procedure META_SCHEMA.SP_CONCURRENT(I_METHOD VARCHAR,I_METHOD_PARAM_1 float, I_METHOD_PARAM_2 float, I_METHOD_PARAM_3 VARCHAR)
     returns ARRAY
     language JAVASCRIPT
-    execute as owner
+    execute as caller
 as
 $$
 // -----------------------------------------------------------------------------
@@ -67,7 +67,6 @@ const STATUS_WAIT = "WAIT TO COMPLETE";
 const STATUS_WARNING = "WARNING";
 const STATUS_FAILURE = "FAILURE";
 const STATUS_IDLE = "IDLE";
-const TASK_NAME_WORKER="WORKER"
 
 const META_SCHEMA="META_SCHEMA";
 const TMP_SCHEMA="TMP_SCHEMA";
@@ -76,6 +75,7 @@ const LOG_TABLE="LOG";
 const SCHEDULER_TABLE="SCHEDULER"
 const WORK_TABLE="WORK";
 const WORKER_TABLE="WORKER";
+const TASK_NAME_WORKER="WORKER"
 
 // Worker timeout and polling interval
 WORKER_TIMEOUT_COUNT=720;
@@ -236,6 +236,22 @@ function kill_all_running_worker_queries() {
     }
 }
 
+// -----------------------------------------------------------------------------	// -----------------------------------------------------------------------------
+//  pre-allocate compute tier	//  assign the next available to a worker that has completed its previous batch.
+// -----------------------------------------------------------------------------	// -----------------------------------------------------------------------------
+function set_min_cluster_count(cnt) {	function assign_next_batch(worker_id,scheduler_session_id) {
+    var sqlquery="";	
+    var batch_id=0;	
+
+    log("SET MIN_CLUSTER_COUNT: "+cnt);	
+
+    sqlquery=`	
+        ALTER WAREHOUSE `+current_warehouse+`	
+        SET MIN_CLUSTER_COUNT=`+cnt+` 	
+    `;	
+    snowflake.execute({sqlText:  sqlquery});	
+}	
+
 // -----------------------------------------------------------------------------
 //  assign the next available to a worker that has completed its previous batch.
 // -----------------------------------------------------------------------------
@@ -390,6 +406,12 @@ function process_request (cluster_count,steps_per_batch) {
         throw new Error ("NO WORKER FOUND")
     }
 
+    // pre-allocate one cluster per task (partition) and reset it to 1; This is just to jump-start	
+    // the creation of all clusters needed.	
+    if (worker_count>0) {	
+        set_min_cluster_count(worker_count);	
+    } 
+
     //initialize worker array of open worker slots
     worker_queue=[];
 
@@ -457,8 +479,10 @@ function process_request (cluster_count,steps_per_batch) {
             } else {
                 throw new Error("MAX WAIT REACHED; ABORT");
             }
-        }                   
+        }                
     } 
+
+    set_min_cluster_count(1);    
 
     sqlquery=`
         DROP SCHEMA `+current_db+`.`+TMP_SCHEMA+`
@@ -554,6 +578,9 @@ catch (err) {
     log("err.code: " + err.code);
     log("err.state: " + err.state);
     log("err.message: " + err.message);
+
+    set_min_cluster_count(1); 
+
     flush_log(STATUS_FAILURE);
 
     suspend_all_workers();
