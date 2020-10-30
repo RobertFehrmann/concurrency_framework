@@ -239,7 +239,7 @@ function kill_all_running_worker_queries() {
 // -----------------------------------------------------------------------------	// -----------------------------------------------------------------------------
 //  pre-allocate compute tier	//  assign the next available to a worker that has completed its previous batch.
 // -----------------------------------------------------------------------------	// -----------------------------------------------------------------------------
-function set_min_cluster_count(cnt) {	function assign_next_batch(worker_id,scheduler_session_id) {
+function set_min_cluster_count(cnt) {
     var sqlquery="";	
     var batch_id=0;	
 
