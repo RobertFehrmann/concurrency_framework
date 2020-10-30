@@ -16,7 +16,7 @@ The input table provides the SQL statements to be executed. It has an ID (statem
 
 In some instances certain statements need to be executed sequentially (like in the sample below). We first execute a "show" which is immediately followed by a result_scan. To support this type of pattern, you define the sql statements in an array.
 
-The example below shows for instance how to get a list of statements to script all roles in an account into a table. 
+The example below shows for instance how to get a list of statements to script all roles in an account into a table. The full code can be found in the [samples directory](../samples).
 
 ```
 select 
